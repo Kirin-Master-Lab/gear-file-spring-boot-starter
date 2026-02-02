@@ -11,6 +11,7 @@ import org.springframework.core.io.ResourceLoader;
 
 import java.io.InputStream;
 import java.util.List;
+import java.util.function.Consumer;
 
 @Slf4j
 @RequiredArgsConstructor
@@ -19,16 +20,26 @@ public class FileEngine implements DownloadService {
     private final ResourceLoader resourceLoader;
     private final List<FileParser> parsers;
 
+    /**
+     * 全量导入
+     */
     public <T> List<T> importFile(InputStream is, Class<T> clazz, String fileName) {
-        log.info("开始解析文件: {}", fileName);
-        String suffix = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+        return getParser(fileName).parse(is, clazz);
+    }
 
-        FileParser parser = parsers.stream()
+    /**
+     * 回调分批导入
+     */
+    public <T> void importFileWithCallback(InputStream is, Class<T> clazz, String fileName, Consumer<List<T>> consumer) {
+        getParser(fileName).parse(is, clazz, consumer);
+    }
+
+    private FileParser getParser(String fileName) {
+        String suffix = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+        return parsers.stream()
                 .filter(p -> p.support(suffix))
                 .findFirst()
-                .orElseThrow(() -> new GearFileException("不支持的解析格式: " + suffix));
-
-        return parser.parse(is, clazz);
+                .orElseThrow(() -> new GearFileException("不支持的文件格式: " + suffix));
     }
 
     public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
