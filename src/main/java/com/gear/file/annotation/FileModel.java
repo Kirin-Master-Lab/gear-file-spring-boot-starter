@@ -1,12 +1,10 @@
 package com.gear.file.annotation;
 
-import java.lang.annotation.ElementType;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.lang.annotation.Target;
+import java.lang.annotation.*;
 
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
+@Documented
 public @interface FileModel {
 
     /**
@@ -21,5 +19,12 @@ public @interface FileModel {
      *
      * @return
      */
-    String showName() default "";  // 下
+    String showName() default "";
+
+
+    /**
+     * 解析时的表头行数[表头行数默认是从0开始的]
+     * 默认1行。如果是复杂表头，业务类上可指定为2、3等
+     */
+    int headRowNumber() default 1;// 下
 }
