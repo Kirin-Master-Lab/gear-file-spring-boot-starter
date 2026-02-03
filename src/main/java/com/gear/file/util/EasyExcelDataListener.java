@@ -3,6 +3,7 @@ package com.gear.file.util;
 import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.event.AnalysisEventListener;
 import com.alibaba.excel.metadata.CellExtra;
+import com.gear.file.exception.GearFileException;
 import com.gear.file.model.SheetRowDTO;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +17,15 @@ public class EasyExcelDataListener<T extends SheetRowDTO> extends AnalysisEventL
 
     private final List<T> dataList = new ArrayList<>();
     private final List<CellExtra> cellExtras = new ArrayList<>();
+
+
+
+    // 关键：每处理完一个 Sheet 必须清空，否则数据会累加导致打平逻辑错误
+    public void clear() {
+        this.dataList.clear();
+        this.cellExtras.clear();
+    }
+
 
     @Override
     public void invoke(T data, AnalysisContext context) {
@@ -39,7 +49,10 @@ public class EasyExcelDataListener<T extends SheetRowDTO> extends AnalysisEventL
 
     @Override
     public void onException(Exception exception, AnalysisContext context) {
-        log.error("解析异常: {}", exception.getMessage());
-        throw new RuntimeException(exception);
+
+        // 获取当前解析的行号
+        Integer rowIndex = context.readRowHolder().getRowIndex();
+        log.error("解析至第 {} 行时发生异常: {}", rowIndex + 1, exception.getMessage());
+        throw new GearFileException("解析异常");
     }
 }
