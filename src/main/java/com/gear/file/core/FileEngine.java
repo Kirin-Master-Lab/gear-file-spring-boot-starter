@@ -44,8 +44,9 @@ public class FileEngine implements DownloadService {
 
     public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
         FileModel anno = clazz.getAnnotation(FileModel.class);
-        if (anno == null) throw new GearFileException("实体类缺少 @FileModel 注解");
-
+        if (anno == null) {
+            throw new GearFileException("实体类缺少 @FileModel 注解");
+        }
         try {
             Resource res = resourceLoader.getResource("classpath:" + anno.path());
             try (InputStream is = res.getInputStream()) {
