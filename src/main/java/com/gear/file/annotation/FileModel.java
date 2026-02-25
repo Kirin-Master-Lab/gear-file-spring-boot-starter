@@ -8,19 +8,13 @@ import java.lang.annotation.*;
 public @interface FileModel {
 
     /**
-     * 从该路径下获取文件资源响应给前端
+     * 下载时显示的文件名 (不再需要 path 静态路径了)
      */
-    String path() default "";      //
+    String showName() default "导入模板";
 
     /**
-     * 前端下载时显示的文件名设置在响应头里
+     * 解析时的表头行数[表头行数默认是从0开始的]
+     * 默认1行。如果是复杂表头，业务类上可指定为2、3等
      */
-    String showName() default "";
-
-
-    /**
-     * 解析时的表头行数索引数从0开始
-     * 一般索引0都是表头,默认从索引1开始读取数据
-     */
-    int headRowNumber() default 1;// 下
+    int headRowNumber() default 1;
 }

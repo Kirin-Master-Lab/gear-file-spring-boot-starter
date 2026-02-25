@@ -1,14 +1,12 @@
 package com.gear.file.core;
 
-import com.alibaba.excel.EasyExcel;
 import com.gear.file.annotation.FileModel;
 import com.gear.file.exception.GearFileException;
+import com.gear.file.strategy.ExcelValidationHandler;
 import com.gear.file.strategy.FileParser;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.ResourceLoader;
 
 import java.io.InputStream;
 import java.util.List;
@@ -18,21 +16,32 @@ import java.util.function.Consumer;
 @RequiredArgsConstructor
 public class FileEngine implements DownloadService {
 
-    private final ResourceLoader resourceLoader;
     private final List<FileParser> parsers;
 
     /**
-     * 全量导入
+     * 动态下载模板
      */
-    public <T> List<T> importFile(InputStream is, Class<T> clazz, String fileName) {
-        return getParser(fileName).parse(is, clazz);
-    }
+    public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
+        String showName = "导入模板"; // 默认文件名
+        FileModel anno = clazz.getAnnotation(FileModel.class);
+        if (anno != null && !anno.showName().isEmpty()) {
+            showName = anno.showName();
+        }
 
+        try {
+            // 调用接口中的默认动态下载方法
+            downloadTemplateDynamic(response, showName, clazz);
+        } catch (Exception e) {
+            throw new GearFileException("动态模板生成失败: " + e.getMessage(), e);
+        }
+    }
     /**
-     * 回调分批导入
+     * 回调分批导入 (带数据校验策略)
      */
-    public <T> void importFileWithCallback(InputStream is, Class<T> clazz, String fileName, Consumer<List<T>> consumer) {
-        getParser(fileName).parse(is, clazz, consumer);
+    public <T> void importFile(InputStream is, Class<T> clazz, String fileName,
+                                           Consumer<List<T>> consumer,
+                                           ExcelValidationHandler<T> validationHandler) {
+        getParser(fileName).parse(is, clazz, consumer, validationHandler);
     }
 
     private FileParser getParser(String fileName) {
@@ -43,37 +52,5 @@ public class FileEngine implements DownloadService {
                 .orElseThrow(() -> new GearFileException("不支持的文件格式: " + suffix));
     }
 
-    public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
-        FileModel anno = clazz.getAnnotation(FileModel.class);
-        if (anno == null) {
-            throw new GearFileException("实体类缺少 @FileModel 注解");
-        }
-        try {
-            Resource res = resourceLoader.getResource("classpath:" + anno.path());
-            try (InputStream is = res.getInputStream()) {
-                setDownloadProperty(response, anno.showName());
-                download(response, is);
-            }
-        } catch (Exception e) {
-            throw new GearFileException("模板下载失败: " + e.getMessage(), e);
-        }
-    }
 
-    public void exportExcel(HttpServletResponse response, Class<?> clazz, List<?> data) {
-        FileModel anno = clazz.getAnnotation(FileModel.class);
-        if (anno == null) {
-            throw new GearFileException("实体类缺少 @FileModel 注解");
-        }
-
-        try {
-            setDownloadProperty(response, anno.showName());
-
-            EasyExcel.write(response.getOutputStream(), clazz)
-                    .sheet()
-                    .doWrite(data);
-
-        } catch (Exception e) {
-            throw new GearFileException("导出 Excel 失败: " + e.getMessage(), e);
-        }
-    }
 }

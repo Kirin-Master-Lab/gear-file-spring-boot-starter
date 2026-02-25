@@ -1,120 +1,76 @@
 package com.gear.file.util;
 
-import com.alibaba.excel.EasyExcelFactory;
-import com.alibaba.excel.ExcelReader;
-import com.alibaba.excel.annotation.ExcelProperty;
+import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.enums.CellExtraTypeEnum;
 import com.alibaba.excel.metadata.CellExtra;
-import com.alibaba.excel.read.metadata.ReadSheet;
+import com.alibaba.excel.read.listener.ReadListener;
 import com.gear.file.exception.GearFileException;
-import com.gear.file.model.SheetRowDTO;
-import org.apache.commons.collections4.CollectionUtils;
-import org.springframework.util.ReflectionUtils;
+import com.gear.file.strategy.ExcelValidationHandler;
+import lombok.extern.slf4j.Slf4j;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.lang.reflect.Field;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
+@Slf4j
 public class EasyExcelReaderUtil {
-
-    private static final Map<Class<?>, Map<Integer, Field>> FIELD_CACHE = new ConcurrentHashMap<>();
 
     private EasyExcelReaderUtil() {}
 
-    public static <T extends SheetRowDTO> void readWithCallback(InputStream is, Class<T> clazz, Consumer<List<T>> consumer, Integer headRow) {
+    /**
+     * 高级流式解析：支持防OOM + 合并单元格打平 + JSR303校验
+     */
+    public static <T> void readWithCallback(InputStream is, Class<T> clazz,
+                                            Consumer<List<T>> consumer, Integer headRow,
+                                            ExcelValidationHandler<T> validationHandler) {
         int headRowNumber = (headRow == null) ? 1 : headRow;
-        EasyExcelDataListener<T> listener = new EasyExcelDataListener<>();
-        List<T> allSheetDataList = new ArrayList<>();
 
-        // 1. 在 Workbook 级别开启 ExtraRead
-        // 3.3.3 版本中，extraRead 是在这里开启的，它会作用于所有 Sheet
-        try (ExcelReader excelReader = EasyExcelFactory.read(is, clazz, listener)
-                .extraRead(CellExtraTypeEnum.MERGE)
-                .autoTrim(true)
-                .build()) {
+        try {
+            // 将流转为字节数组以支持两次读取 (注：如果预期单文件超过 500MB，建议入参改为 java.io.File 避免吃内存)
+            byte[] streamBytes = toByteArray(is);
 
-            List<ReadSheet> sheets = excelReader.excelExecutor().sheetList();
-
-            for (ReadSheet sheet : sheets) {
-                // 2. 构建 ReadSheet，这里只配置 Sheet 特有的参数
-                ReadSheet readSheet = EasyExcelFactory.readSheet(sheet.getSheetNo())
-                        .headRowNumber(headRowNumber)
-                        .build();
-
-                // 3. 执行当前 Sheet 读取
-                excelReader.read(readSheet);
-
-                List<T> currentData = listener.getDataList();
-                List<CellExtra> currentSheetExtras = listener.getCellExtras();
-
-                if (CollectionUtils.isNotEmpty(currentData)) {
-                    // 打平逻辑
-                    if (CollectionUtils.isNotEmpty(currentSheetExtras)) {
-                        flatMergeData(currentData, currentSheetExtras, clazz);
+            // Pass 1: 极速读取，只缓存合并规则
+            List<CellExtra> mergeRegions = new ArrayList<>();
+            try (InputStream pass1Stream = new ByteArrayInputStream(streamBytes)) {
+                EasyExcel.read(pass1Stream, clazz, new ReadListener<T>() {
+                    @Override
+                    public void invoke(T data, AnalysisContext context) {}
+                    @Override
+                    public void doAfterAllAnalysed(AnalysisContext context) {}
+                    @Override
+                    public void extra(CellExtra extra, AnalysisContext context) {
+                        if (extra.getType() == CellExtraTypeEnum.MERGE) {
+                            mergeRegions.add(extra);
+                        }
                     }
-                    allSheetDataList.addAll(currentData);
-                    listener.clear();
-                }
+                }).extraRead(CellExtraTypeEnum.MERGE).sheet().headRowNumber(headRowNumber).doRead();
             }
 
-            if (CollectionUtils.isNotEmpty(allSheetDataList)) {
-                consumer.accept(allSheetDataList);
+            // Pass 2: 正式数据流式读取
+            try (InputStream pass2Stream = new ByteArrayInputStream(streamBytes)) {
+                SmartExcelListener<T> listener = new SmartExcelListener<>(consumer, mergeRegions,validationHandler);
+                EasyExcel.read(pass2Stream, clazz, listener)
+                        .sheet()
+                        .headRowNumber(headRowNumber)
+                        .doRead();
             }
 
         } catch (Exception e) {
-            throw new GearFileException("Excel多Sheet解析失败: " + e.getMessage(), e);
-        } finally {
-            allSheetDataList.clear();
+            throw new GearFileException("Excel 解析失败: " + e.getMessage(), e);
         }
     }
 
-    private static <T extends SheetRowDTO> void flatMergeData(List<T> data, List<CellExtra> cellExtras, Class<T> clazz) {
-        Map<Integer, T> dataMap = data.stream()
-                .collect(Collectors.toMap(SheetRowDTO::getLineNumber, Function.identity(), (o1, o2) -> o1));
-
-        Map<Integer, Field> indexedFields = getIndexedFields(clazz);
-
-        for (CellExtra cellExtra : cellExtras) {
-            int firstRow = cellExtra.getFirstRowIndex();
-            int lastRow = cellExtra.getLastRowIndex();
-            int firstCol = cellExtra.getFirstColumnIndex();
-
-            Field field = indexedFields.get(firstCol);
-            if (field == null) continue;
-
-            T firstRowData = dataMap.get(firstRow);
-            if (firstRowData == null) continue;
-
-            Object initValue = ReflectionUtils.getField(field, firstRowData);
-            if (initValue == null) continue;
-
-            for (int i = firstRow + 1; i <= lastRow; i++) {
-                T currentRow = dataMap.get(i);
-                if (currentRow != null) {
-                    ReflectionUtils.setField(field, currentRow, initValue);
-                }
-            }
+    private static byte[] toByteArray(InputStream in) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int n;
+        while ((n = in.read(buffer)) != -1) {
+            out.write(buffer, 0, n);
         }
-    }
-
-    private static Map<Integer, Field> getIndexedFields(Class<?> clazz) {
-        return FIELD_CACHE.computeIfAbsent(clazz, k -> {
-            Map<Integer, Field> map = new HashMap<>();
-            Field[] fields = k.getDeclaredFields();
-            int indexCounter = 0;
-            for (Field field : fields) {
-                ExcelProperty anno = field.getAnnotation(ExcelProperty.class);
-                int index = (anno != null && anno.index() != -1) ? anno.index() : indexCounter;
-
-                ReflectionUtils.makeAccessible(field);
-                map.put(index, field);
-                indexCounter++;
-            }
-            return Collections.unmodifiableMap(map);
-        });
+        return out.toByteArray();
     }
 }
