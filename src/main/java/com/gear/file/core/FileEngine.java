@@ -1,5 +1,6 @@
 package com.gear.file.core;
 
+import com.alibaba.excel.EasyExcel;
 import com.gear.file.annotation.FileModel;
 import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.FileParser;
@@ -50,10 +51,29 @@ public class FileEngine implements DownloadService {
         try {
             Resource res = resourceLoader.getResource("classpath:" + anno.path());
             try (InputStream is = res.getInputStream()) {
-                download(response, anno.showName(), is);
+                setDownloadProperty(response, anno.showName());
+                download(response, is);
             }
         } catch (Exception e) {
             throw new GearFileException("模板下载失败: " + e.getMessage(), e);
+        }
+    }
+
+    public void exportExcel(HttpServletResponse response, Class<?> clazz, List<?> data) {
+        FileModel anno = clazz.getAnnotation(FileModel.class);
+        if (anno == null) {
+            throw new GearFileException("实体类缺少 @FileModel 注解");
+        }
+
+        try {
+            setDownloadProperty(response, anno.showName());
+
+            EasyExcel.write(response.getOutputStream(), clazz)
+                    .sheet()
+                    .doWrite(data);
+
+        } catch (Exception e) {
+            throw new GearFileException("导出 Excel 失败: " + e.getMessage(), e);
         }
     }
 }

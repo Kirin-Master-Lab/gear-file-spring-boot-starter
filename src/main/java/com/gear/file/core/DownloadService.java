@@ -13,12 +13,15 @@ import java.nio.charset.StandardCharsets;
 public interface DownloadService {
 
 
-    default void download(HttpServletResponse resp, String showFileName, InputStream is) throws IOException {
+    default void setDownloadProperty(HttpServletResponse resp, String showFileName) throws IOException {
         String encodedFileName = URLEncoder.encode(showFileName, StandardCharsets.UTF_8);
         resp.setCharacterEncoding(StandardCharsets.UTF_8.name());
         resp.setContentType("application/octet-stream");
         resp.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + encodedFileName + "\"");
         resp.setHeader("filename", encodedFileName);
+    }
+
+    default void download(HttpServletResponse resp,InputStream is) throws IOException {
         ServletOutputStream os = resp.getOutputStream();
         FileCopyUtils.copy(is, os);
         os.flush();
