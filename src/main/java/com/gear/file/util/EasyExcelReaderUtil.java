@@ -55,6 +55,16 @@ public class EasyExcelReaderUtil {
                                     sheetMergeRegions.computeIfAbsent(sheetNo, k -> new ArrayList<>()).add(extra);
                                 }
                             }
+                            @Override
+                            public void onException(Exception exception, AnalysisContext context) throws Exception {
+                                // 如果是类型转换异常，预扫描阶段直接吞掉，保证能把所有的合并规则扫完。
+                                // 真正的业务脏数据拦截，留给 Pass 2 的 SmartExcelListener 去处理。
+                                if (exception instanceof com.alibaba.excel.exception.ExcelDataConvertException) {
+                                    return;
+                                }
+                                // 如果是其他底层致命异常，则抛出
+                                throw exception;
+                            }
                         }).extraRead(CellExtraTypeEnum.MERGE)
                         .headRowNumber(headRowNumber)
                         .doReadAll();

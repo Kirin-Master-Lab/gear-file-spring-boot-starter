@@ -71,6 +71,14 @@ public class FileEngine implements DownloadService {
         return (anno != null && !anno.showName().isEmpty()) ? anno.showName() : "导出数据";
     }
 
+    /**
+     *解析导入的文件转成LIST
+     *
+     * @param is
+     * @param clazz
+     * @param fileName
+     * @return {@link List }<{@link T }>
+     */
     public <T> List<T> importFileSync(InputStream is, Class<T> clazz, String fileName) {
         List<T> allData = new ArrayList<>();
         this.importFile(is, clazz, fileName, allData::addAll, null);

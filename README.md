@@ -10,11 +10,7 @@
 
 业务同学只需配置好 DTO，真正做到“代码即模板”。
 
-**`src/main/java/com/gear/file/demo/dto/UserVehicleDTO.java`**
-
-```java
-package com.gear.file.demo.dto;
-
+import com.alibaba.excel.annotation.ExcelIgnore;
 import com.alibaba.excel.annotation.ExcelProperty;
 import com.gear.file.annotation.ExcelSheetName;
 import com.gear.file.annotation.ExcelSheetNo;
@@ -25,39 +21,38 @@ import lombok.Data;
 
 @Data
 // 核心配置：定义下载模板名、开启合并单元格智能打平、设置批处理大小榨干 DB 性能
-@FileModel(showName = "车辆与员工导入模板", enableMerge = true, batchSize = 3000)
+@FileModel(showName = "车辆与员工导入模板", enableMerge = true, batchSize = 2)
 public class UserVehicleDTO {
 
     // --- 组件专属：上下文自动注入 ---
+    @ExcelIgnore
     @ExcelSheetNo
     private Integer sheetNo;      // 自动注入：当前数据在第几个 Sheet (从 0 开始)
 
+    @ExcelIgnore
     @ExcelSheetName
     private String sheetName;     // 自动注入：当前数据的 Sheet 名称
 
     // --- 业务数据：支持分组校验 (Validation Group) ---
-    @NotBlank(message = "所属部门不能为空", groups = {InsertGroup.class, UpdateGroup.class})
-    @ExcelProperty("所属部门")     // 假设部门在 Excel 里是合并单元格，组件会自动向下打平填充
+    @NotBlank(message = "所属部门不能为空")
+    @ExcelProperty(value = "所属部门",index = 0)     // 假设部门在 Excel 里是合并单元格，组件会自动向下打平填充
     private String deptName;
 
-    @NotBlank(message = "员工姓名不能为空", groups = InsertGroup.class)
-    @ExcelProperty("员工姓名")
+    @NotBlank(message = "员工姓名不能为空")
+    @ExcelProperty(value = "员工姓名",index = 1)
     private String empName;
 
-    @Min(value = 18, message = "年龄不能小于18岁", groups = {InsertGroup.class, UpdateGroup.class})
-    @ExcelProperty("年龄")
+    @Min(value = 18, message = "年龄不能小于18岁")
+    @ExcelProperty(value = "年龄",index = 2)
     private Integer age;
 
-    // 校验分组标识接口（普通项目可写在一个全局常量类里）
-    public interface InsertGroup {}
-    public interface UpdateGroup {}
 }
 
 
-package com.gear.file.demo.controller;
+package com.abupdate.vehiclerecord.controller;
 
+import com.abupdate.vehiclerecord.dto.UserVehicleDTO;
 import com.gear.file.core.FileEngine;
-import com.gear.file.demo.dto.UserVehicleDTO;
 import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.ConstraintViolation;
 import lombok.RequiredArgsConstructor;
@@ -70,12 +65,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
 @RequestMapping("/api/demo/file")
 @RequiredArgsConstructor
-public class FileDemoController {
+public class UserController{
 
     // 唯一需要注入的组件引擎
     private final FileEngine fileEngine;
@@ -104,7 +100,7 @@ public class FileDemoController {
     }
 
     // ==========================================
-    // 场景三: 高可用异步导入 (强推！防 OOM + 全量错误收集 + 分组校验)
+    // 场景三：🌟 商业级高可用异步导入 (强推！防 OOM + 全量错误收集 + 分组校验)
     // ==========================================
     @PostMapping("/import-async")
     public Map<String, Object> importAsync(@RequestParam("file") MultipartFile file) throws Exception {
@@ -128,7 +124,7 @@ public class FileDemoController {
                     @Override
                     public boolean onValidateFail(UserVehicleDTO data, int rowIndex, Set<ConstraintViolation<UserVehicleDTO>> violations) {
                         // 收集 JSR-303 业务规则校验错误
-                        String msg = violations.iterator().next().getMessage();
+                        String msg = violations.stream().map(ConstraintViolation::getMessage).collect(Collectors.joining(","));
                         errorLogs.add("第 " + (rowIndex + 1) + " 行，规则冲突: " + msg);
                         return false; // 丢弃该条脏数据
                     }
@@ -139,10 +135,10 @@ public class FileDemoController {
                         errorLogs.add(String.format("Sheet[%s] 第 %d 行，【%s】填写了无法识别的 '%s'",
                                 sheetName, (rowIndex + 1), headName, badData));
                     }
-                },
+                }
 
                 // 3. 传入校验分组 (比如只触发 InsertGroup 相关的校验规则)
-                UserVehicleDTO.InsertGroup.class
+                //UserVehicleDTO.InsertGroup.class
         );
 
         if (!errorLogs.isEmpty()) {
