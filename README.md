@@ -1,145 +1,204 @@
-🚀 gear-file-spring-boot-starter 快速上手指南
-本组件极大地简化了 Excel 的导入、导出、模板下载以及合并单元格解析，并天然支持 JSR-303 数据校验、多 Sheet 隔离防串数据、防 OOM 批处理。
+# gear-file-spring-boot-starter 全场景使用演示 (Demo)
 
-📦 1. 引入依赖
-在业务项目的 pom.xml 中引入组件（版本号以实际发布为准）：
+这份指南提供了 `gear-file-spring-boot-starter` 组件在日常业务中最常见的 6 大核心场景的完整代码示例。
 
-XML
-<dependency>
-    <groupId>com.gear.infra</groupId>
-    <artifactId>gear-file-spring-boot-starter</artifactId>
-    <version>1.0.0-RELEASE</version>
-</dependency>
-📝 2. 核心：定义你的 DTO (数据即模板)
-告别维护静态物理 Excel 模板的烦恼。现在，你只需要写好 DTO，模板会自动生成，合并单元格会自动打平！
+通过引入本组件，业务研发团队无需再维护物理 Excel 模板，所有解析、合并单元格打平、JSR-303 校验、分页防 OOM 处理等底层逻辑均已被框架完全接管。
 
-Java
+---
+
+## 1. 规范先行：定义实体类 (DTO)
+
+业务同学只需配置好 DTO，真正做到“代码即模板”。
+
+**`src/main/java/com/gear/file/demo/dto/UserVehicleDTO.java`**
+
+```java
+package com.gear.file.demo.dto;
+
 import com.alibaba.excel.annotation.ExcelProperty;
 import com.gear.file.annotation.ExcelSheetName;
+import com.gear.file.annotation.ExcelSheetNo;
 import com.gear.file.annotation.FileModel;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 
 @Data
-// @FileModel 是组件核心注解：
-// showName: 下载模板或导出时的默认文件名
-// enableMerge = true: 开启合并单元格智能打平 (默认 false，普通表千万别开，不开性能翻倍)
-// batchSize = 2000: 达到 2000 条才触发一次入库回调，防 OOM 且榨干数据库性能
-@FileModel(showName = "员工台账导入模板", enableMerge = true, batchSize = 2000)
-public class UserImportDTO {
+// 核心配置：定义下载模板名、开启合并单元格智能打平、设置批处理大小榨干 DB 性能
+@FileModel(showName = "车辆与员工导入模板", enableMerge = true, batchSize = 3000)
+public class UserVehicleDTO {
 
-    // 魔法注解：自动将当前数据所在的 Sheet 页名称注入到这个字段里
+    // --- 组件专属：上下文自动注入 ---
+    @ExcelSheetNo
+    private Integer sheetNo;      // 自动注入：当前数据在第几个 Sheet (从 0 开始)
+
     @ExcelSheetName
-    private String sheetName;
+    private String sheetName;     // 自动注入：当前数据的 Sheet 名称
 
-    @NotBlank(message = "所属部门不能为空")
-    @ExcelProperty("所属部门") // 如果 Excel 里部门是跨行合并的，组件会自动给每一行填充这个部门名！
+    // --- 业务数据：支持分组校验 (Validation Group) ---
+    @NotBlank(message = "所属部门不能为空", groups = {InsertGroup.class, UpdateGroup.class})
+    @ExcelProperty("所属部门")     // 假设部门在 Excel 里是合并单元格，组件会自动向下打平填充
     private String deptName;
 
-    @NotBlank(message = "员工姓名不能为空")
+    @NotBlank(message = "员工姓名不能为空", groups = InsertGroup.class)
     @ExcelProperty("员工姓名")
     private String empName;
 
-    @Min(value = 18, message = "未成年人禁止录入")
+    @Min(value = 18, message = "年龄不能小于18岁", groups = {InsertGroup.class, UpdateGroup.class})
     @ExcelProperty("年龄")
     private Integer age;
+
+    // 校验分组标识接口（普通项目可写在一个全局常量类里）
+    public interface InsertGroup {}
+    public interface UpdateGroup {}
 }
-🎮 3. 业务调用示例 (Controller / Service)
-在任何需要处理 Excel 的地方，直接 @Resource 或构造器注入 FileEngine 即可。
 
-场景一：下载动态模板
-自动根据 DTO 上的 @ExcelProperty 实时生成带有表头的 Excel 模板文件给前端下载。
 
-Java
+package com.gear.file.demo.controller;
+
+import com.gear.file.core.FileEngine;
+import com.gear.file.demo.dto.UserVehicleDTO;
+import com.gear.file.strategy.ExcelValidationHandler;
+import jakarta.validation.ConstraintViolation;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import jakarta.servlet.http.HttpServletResponse;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+@Slf4j
 @RestController
-@RequestMapping("/api/user")
+@RequestMapping("/api/demo/file")
 @RequiredArgsConstructor
-public class UserController {
+public class FileDemoController {
 
+    // 唯一需要注入的组件引擎
     private final FileEngine fileEngine;
 
+    // ==========================================
+    // 场景一：动态模板下载 (无需物理文件)
+    // ==========================================
     @GetMapping("/template")
     public void downloadTemplate(HttpServletResponse response) {
-        // 一行代码搞定，连文件名都自动从 @FileModel 里拿了
-        fileEngine.downloadTemplate(response, UserImportDTO.class);
+        fileEngine.downloadTemplate(response, UserVehicleDTO.class);
     }
-}
-场景二：极简全量导入 (适合 1万条以内的小配置表)
-不需要分批，不需要收集复杂错误，错了直接抛异常中断前端。
 
-Java
-@PostMapping("/import-sync")
-public List<UserImportDTO> importSync(@RequestParam("file") MultipartFile file) throws Exception {
-    // 同步等待，直接返回解析并校验好的所有数据！
-    List<UserImportDTO> dataList = fileEngine.importFileSync(
-            file.getInputStream(),
-            UserImportDTO.class,
-            file.getOriginalFilename()
-    );
-    // userService.saveBatch(dataList);
-    return dataList;
-}
-场景三：🌟 企业级大文件分批导入 + 脏数据收集 (强推)
-适合几十万条数据的超大 Excel，绝不 OOM。遇到错误数据不中断，收集错误原因最后统一返回给前端展示。
-
-Java
-@PostMapping("/import-async")
-public Map<String, Object> importAsync(@RequestParam("file") MultipartFile file) throws Exception {
-    List<String> errorLogs = new ArrayList<>(); // 错误收集桶
-
-    fileEngine.importFile(
-            file.getInputStream(),
-            UserImportDTO.class,
-            file.getOriginalFilename(),
-
-            // 1. 成功回调 (每满 2000 条触发一次，dataList 里的都是校验完美的净数据)
-            validDataList -> {
-                if (errorLogs.isEmpty()) {
-                    userService.saveBatch(validDataList); // 没发现脏数据才真实落库
-                }
-            },
-
-            // 2. 异常策略回调 (JSR-303 校验失败、或格式填错时触发)
-            (data, rowIndex, violations) -> {
-                // 组件已经把提示翻译成了人话，比如："Sheet[华南区] 第 3 行数据校验失败: 【年龄】未成年人禁止录入"
-                String errorMsg = violations.iterator().next().getMessage();
-                errorLogs.add(errorMsg);
-                return false; // 返回 false 表示丢弃这条脏数据，不让它进入 validDataList
-            }
-    );
-
-    // 3. 解析完毕，如果有错，把错误清单扔给前端弹窗
-    if (!errorLogs.isEmpty()) {
-        throw new BusinessException("导入失败，发现脏数据：\n" + String.join("\n", errorLogs));
+    // ==========================================
+    // 场景二：极简同步导入 (适合万条以内、错了直接抛异常的小配置表)
+    // ==========================================
+    @PostMapping("/import-sync")
+    public List<UserVehicleDTO> importSync(@RequestParam("file") MultipartFile file) throws Exception {
+        // 一行代码拿回所有清洗、校验过的完美数据
+        List<UserVehicleDTO> dataList = fileEngine.importFileSync(
+                file.getInputStream(),
+                UserVehicleDTO.class,
+                file.getOriginalFilename()
+        );
+        // 伪代码：userService.saveBatch(dataList);
+        return dataList;
     }
-    return Map.of("msg", "导入成功");
-}
-场景四：全能数据导出
-提供了应对百万级数据量导出的终极方案。
 
-Java
-// 1. 同步全量导出 (适合几万条以内)
-@GetMapping("/export")
-public void exportData(HttpServletResponse response) {
-    List<UserImportDTO> allData = userService.listAll();
-    fileEngine.exportData(response, UserImportDTO.class, allData);
-}
+    // ==========================================
+    // 场景三: 高可用异步导入 (强推！防 OOM + 全量错误收集 + 分组校验)
+    // ==========================================
+    @PostMapping("/import-async")
+    public Map<String, Object> importAsync(@RequestParam("file") MultipartFile file) throws Exception {
+        List<String> errorLogs = new ArrayList<>(); // 错误收集桶
 
-// 2. 🌟 分页异步导出 (防 OOM，适合百万级数据)
-@GetMapping("/export-big")
-public void exportBigData(HttpServletResponse response) {
-    fileEngine.exportBigData(response, UserImportDTO.class, pageIndex -> {
-        // pageIndex 从 1 开始，每次回调你只需要去数据库查一页数据返回即可，直到返回空集合结束
-        Page<UserImportDTO> page = userService.page(new Page<>(pageIndex, 5000));
-        return page.getRecords();
-    });
-}
+        fileEngine.importFile(
+                file.getInputStream(),
+                UserVehicleDTO.class,
+                file.getOriginalFilename(),
 
-// 3. 纯动态导出 (连 DTO 都不用写，直接塞表头数组和数据数组，适合做自定义报表)
-@GetMapping("/export-dynamic")
-public void exportDynamic(HttpServletResponse response) {
-    List<List<String>> headers = List.of(List.of("动态列1"), List.of("动态列2"));
-    List<List<Object>> data = List.of(List.of("张三", 18), List.of("李四", 20));
-    fileEngine.exportDynamicData(response, "动态大盘报表", headers, data);
+                // 1. 成功回调 (每满 batchSize 触发一次，完全防 OOM)
+                validDataList -> {
+                    if (errorLogs.isEmpty()) {
+                        log.info("成功读取 {} 条优质数据，准备入库...", validDataList.size());
+                        // 伪代码：userService.saveBatch(validDataList);
+                    }
+                },
+
+                // 2. 异常接管策略 (使用匿名内部类接管所有异常底线)
+                new ExcelValidationHandler<UserVehicleDTO>() {
+                    @Override
+                    public boolean onValidateFail(UserVehicleDTO data, int rowIndex, Set<ConstraintViolation<UserVehicleDTO>> violations) {
+                        // 收集 JSR-303 业务规则校验错误
+                        String msg = violations.iterator().next().getMessage();
+                        errorLogs.add("第 " + (rowIndex + 1) + " 行，规则冲突: " + msg);
+                        return false; // 丢弃该条脏数据
+                    }
+
+                    @Override
+                    public void onConvertException(int rowIndex, int colIndex, String sheetName, String headName, String badData, Exception ex) {
+                        // 收集底层的类型乱填错误 (比如年龄填了"二十")
+                        errorLogs.add(String.format("Sheet[%s] 第 %d 行，【%s】填写了无法识别的 '%s'",
+                                sheetName, (rowIndex + 1), headName, badData));
+                    }
+                },
+
+                // 3. 传入校验分组 (比如只触发 InsertGroup 相关的校验规则)
+                UserVehicleDTO.InsertGroup.class
+        );
+
+        if (!errorLogs.isEmpty()) {
+            return Map.of("code", 500, "msg", "发现脏数据，已终止导入", "errors", errorLogs);
+        }
+        return Map.of("code", 200, "msg", "导入全部成功！");
+    }
+
+    // ==========================================
+    // 场景四：常规全量导出
+    // ==========================================
+    @GetMapping("/export-sync")
+    public void exportSync(HttpServletResponse response) {
+        // 伪代码：List<UserVehicleDTO> dbData = userService.list();
+        List<UserVehicleDTO> mockData = List.of(new UserVehicleDTO());
+
+        fileEngine.exportData(response, UserVehicleDTO.class, mockData);
+    }
+
+    // ==========================================
+    // 场景五：🌟 百万级分页防 OOM 导出
+    // ==========================================
+    @GetMapping("/export-big")
+    public void exportBig(HttpServletResponse response) {
+        fileEngine.exportBigData(response, UserVehicleDTO.class, pageIndex -> {
+            // pageIndex 会从 1 开始不断递增，直到你返回空的 List 为止
+            log.info("组件请求提供第 {} 页数据写入流...", pageIndex);
+
+            // 伪代码：Page<UserVehicleDTO> page = userService.page(new Page<>(pageIndex, 5000));
+            // return page.getRecords();
+
+            // 模拟：导出 3 页后结束
+            return pageIndex > 3 ? new ArrayList<>() : List.of(new UserVehicleDTO());
+        });
+    }
+
+    // ==========================================
+    // 场景六：🌟 纯动态表头 + 动态数据分页导出 (无需写 DTO，应对大盘自定义报表)
+    // ==========================================
+    @GetMapping("/export-dynamic")
+    public void exportDynamic(HttpServletResponse response) {
+        // 1. 动态构造复杂的表头 (哪怕是多级表头也能直接构造)
+        List<List<String>> dynamicHeaders = List.of(
+                List.of("统计维度", "省份"),
+                List.of("统计维度", "城市"),
+                List.of("核心指标", "总销售额")
+        );
+
+        fileEngine.exportBigDynamicData(response, "全国销售动态大盘.xlsx", dynamicHeaders, pageIndex -> {
+            // 同样支持分页，从数据库拉取 List<Map> 或自定义结构后，转为 List<Object>
+            if (pageIndex > 2) return new ArrayList<>(); // 模拟 2 页结束
+
+            return List.of(
+                    List.of("广东", "深圳", 99999.99),
+                    List.of("浙江", "杭州", 88888.88)
+            );
+        });
+    }
 }
