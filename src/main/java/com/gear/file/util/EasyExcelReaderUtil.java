@@ -27,7 +27,7 @@ public class EasyExcelReaderUtil {
 
     public static <T> void readWithCallback(InputStream is, Class<T> clazz,
                                             Consumer<List<T>> consumer, Integer headRow,
-                                            boolean enableMerge, // 接收合并开关
+                                            boolean enableMerge,
                                             ExcelValidationHandler<T> validationHandler,
                                             Validator validator,
                                             Class<?>... groups) {
@@ -36,35 +36,38 @@ public class EasyExcelReaderUtil {
 
         try (InputStream autoCloseIs = is) {
             tempFile = File.createTempFile("gear-excel-", ".tmp");
-            // 移除了 deleteOnExit()，避免长生命周期服务内存泄漏，依靠 finally 清理即可
             Files.copy(autoCloseIs, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
             Map<Integer, List<CellExtra>> sheetMergeRegions = new HashMap<>();
 
-            // 仅当业务实体声明需要合并单元格时，才执行耗时的 Pass 1 扫描，大幅提升普通文件解析性能
             if (enableMerge) {
                 EasyExcel.read(tempFile, clazz, new ReadListener<T>() {
-                    @Override
-                    public void invoke(T data, AnalysisContext context) {}
-                    @Override
-                    public void doAfterAllAnalysed(AnalysisContext context) {}
-                    @Override
-                    public void extra(CellExtra extra, AnalysisContext context) {
-                        if (extra.getType() == CellExtraTypeEnum.MERGE) {
-                            Integer sheetNo = context.readSheetHolder().getSheetNo();
-                            sheetMergeRegions.computeIfAbsent(sheetNo, k -> new ArrayList<>()).add(extra);
-                        }
-                    }
-                }).extraRead(CellExtraTypeEnum.MERGE).doReadAll();
+                            @Override
+                            public void invoke(T data, AnalysisContext context) {}
+                            @Override
+                            public void doAfterAllAnalysed(AnalysisContext context) {}
+                            @Override
+                            public void extra(CellExtra extra, AnalysisContext context) {
+                                if (extra.getType() == CellExtraTypeEnum.MERGE) {
+                                    Integer sheetNo = context.readSheetHolder().getSheetNo();
+                                    sheetMergeRegions.computeIfAbsent(sheetNo, k -> new ArrayList<>()).add(extra);
+                                }
+                            }
+                        }).extraRead(CellExtraTypeEnum.MERGE)
+                        .headRowNumber(headRowNumber) // ✨ 优化点 4：为预扫描加固，防止长图表或乱码表头导致异常
+                        .doReadAll();
             }
 
-            // Pass 2: 正式数据读取，透传 groups 和 clazz
             SmartExcelListener<T> listener = new SmartExcelListener<>(clazz, consumer, sheetMergeRegions, validationHandler, validator, groups);
             EasyExcel.read(tempFile, clazz, listener)
                     .headRowNumber(headRowNumber)
                     .doReadAll();
 
         } catch (Exception e) {
+            // 这里我们不再笼统抛错，如果已经是业务级异常则直接抛出，保留人话提示
+            if (e instanceof GearFileException || e.getCause() instanceof GearFileException) {
+                throw (RuntimeException) (e instanceof GearFileException ? e : e.getCause());
+            }
             throw new GearFileException("Excel 解析失败: " + e.getMessage(), e);
         } finally {
             if (tempFile != null && tempFile.exists()) {

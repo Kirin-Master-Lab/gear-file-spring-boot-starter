@@ -2,6 +2,7 @@ package com.gear.file.util;
 
 import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.event.AnalysisEventListener;
+import com.alibaba.excel.exception.ExcelDataConvertException;
 import com.alibaba.excel.metadata.CellExtra;
 import com.alibaba.excel.metadata.Head;
 import com.gear.file.annotation.ExcelSheetName;
@@ -15,6 +16,7 @@ import org.springframework.util.ReflectionUtils;
 
 import java.lang.reflect.Field;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -22,20 +24,26 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     private static final int BATCH_COUNT = 1000;
 
+    // ✨ 优化点 3：引入全局并发字典缓存，消除每次 new Listener 时的重复反射损耗
+    private static final Map<Class<?>, SheetContextFields> FIELD_CACHE = new ConcurrentHashMap<>();
+
+    private static class SheetContextFields {
+        Field sheetNoField;
+        Field sheetNameField;
+    }
+
     private List<T> cachedDataList = new ArrayList<>(BATCH_COUNT);
     private final Class<T> clazz;
     private final Consumer<List<T>> consumer;
     private final ExcelValidationHandler<T> validationHandler;
     private final Validator validator;
-    private final Class<?>[] groups; // 保存校验分组
+    private final Class<?>[] groups;
 
     private final Map<Integer, List<CellExtra>> sheetMergeRegions;
     private final Map<Integer, Object> mergeDataCache = new HashMap<>();
     private Map<Integer, Field> colIndexToFieldMap;
 
     private Integer currentSheetNo;
-
-    // Sheet 上下文注入字段缓存
     private Field sheetNoField;
     private Field sheetNameField;
 
@@ -50,20 +58,30 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         this.validator = validator;
         this.groups = groups;
 
-        initSheetContextFields(); // 初始化上下文注解字段
+        initSheetContextFields();
     }
 
+    /**
+     * O(1) 极速获取上下文注入字段
+     */
     private void initSheetContextFields() {
-        ReflectionUtils.doWithFields(clazz, field -> {
-            if (field.isAnnotationPresent(ExcelSheetNo.class)) {
-                ReflectionUtils.makeAccessible(field);
-                sheetNoField = field;
-            }
-            if (field.isAnnotationPresent(ExcelSheetName.class)) {
-                ReflectionUtils.makeAccessible(field);
-                sheetNameField = field;
-            }
+        SheetContextFields contextFields = FIELD_CACHE.computeIfAbsent(clazz, k -> {
+            SheetContextFields fields = new SheetContextFields();
+            ReflectionUtils.doWithFields(k, field -> {
+                if (field.isAnnotationPresent(ExcelSheetNo.class)) {
+                    ReflectionUtils.makeAccessible(field);
+                    fields.sheetNoField = field;
+                }
+                if (field.isAnnotationPresent(ExcelSheetName.class)) {
+                    ReflectionUtils.makeAccessible(field);
+                    fields.sheetNameField = field;
+                }
+            });
+            return fields;
         });
+
+        this.sheetNoField = contextFields.sheetNoField;
+        this.sheetNameField = contextFields.sheetNameField;
     }
 
     @Override
@@ -82,7 +100,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             initColIndexToFieldMap(context);
         }
 
-        // 1. 注入 Sheet 上下文信息
         if (sheetNoField != null) {
             ReflectionUtils.setField(sheetNoField, data, sheetNo);
         }
@@ -90,10 +107,8 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             ReflectionUtils.setField(sheetNameField, data, sheetName);
         }
 
-        // 2. 填充合并数据
         fillMergeData(data, rowIndex, sheetNo);
 
-        // 3. JSR-303 分组校验
         Set<ConstraintViolation<T>> violations = validator.validate(data, groups);
         if (!violations.isEmpty()) {
             if (validationHandler != null) {
@@ -120,6 +135,29 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             consumer.accept(cachedDataList);
             cachedDataList = new ArrayList<>(BATCH_COUNT);
         }
+    }
+
+    /**
+     * ✨ 优化点 1：重写 onException 捕获类型转换死角
+     * 当 Excel 中的内容 (例如："二十") 无法转换为 DTO 字段类型 (例如：Integer) 时触发。
+     */
+    @Override
+    public void onException(Exception exception, AnalysisContext context) throws Exception {
+        if (exception instanceof ExcelDataConvertException) {
+            ExcelDataConvertException ex = (ExcelDataConvertException) exception;
+            int rowIndex = ex.getRowIndex();
+            int colIndex = ex.getColumnIndex();
+            String sheetName = context.readSheetHolder().getSheetName();
+            String badData = ex.getCellData().getStringValue();
+
+            // 翻译底层异常为人话
+            String errorMsg = String.format("数据类型转换失败！输入的内容 '%s' 格式不正确", badData);
+
+            // 抛出友好的业务异常中断解析
+            throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行，第 " + (colIndex + 1) + " 列" + errorMsg);
+        }
+        // 如果是其他底层致命异常，继续往外抛出
+        throw exception;
     }
 
     private void initColIndexToFieldMap(AnalysisContext context) {

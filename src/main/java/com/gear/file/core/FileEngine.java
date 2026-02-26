@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 @Slf4j
 @RequiredArgsConstructor
@@ -22,18 +23,38 @@ public class FileEngine implements DownloadService {
     private final Validator validator;
 
     public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
-        String showName = "导入模板";
-        FileModel anno = clazz.getAnnotation(FileModel.class);
-        if (anno != null && !anno.showName().isEmpty()) {
-            showName = anno.showName();
-        }
-
+        String showName = getShowName(clazz);
         try {
             downloadTemplateDynamic(response, showName, clazz);
         } catch (Exception e) {
             throw new GearFileException("动态模板生成失败: " + e.getMessage(), e);
         }
     }
+
+    // ================== 新增的导出 API ==================
+
+    public <T> void exportData(HttpServletResponse response, Class<T> clazz, List<T> data) {
+        try {
+            exportExcel(response, getShowName(clazz), clazz, data);
+        } catch (Exception e) {
+            throw new GearFileException("数据导出失败: " + e.getMessage(), e);
+        }
+    }
+
+    public <T> void exportBigData(HttpServletResponse response, Class<T> clazz, Function<Integer, List<T>> pageDataSupplier) {
+        try {
+            exportBigExcel(response, getShowName(clazz), clazz, pageDataSupplier);
+        } catch (Exception e) {
+            throw new GearFileException("分页数据导出失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String getShowName(Class<?> clazz) {
+        FileModel anno = clazz.getAnnotation(FileModel.class);
+        return (anno != null && !anno.showName().isEmpty()) ? anno.showName() : "导出数据";
+    }
+
+    // ================== 导入 API 保持不变 ==================
 
     public <T> List<T> importFileSync(InputStream is, Class<T> clazz, String fileName) {
         List<T> allData = new ArrayList<>();
@@ -45,9 +66,6 @@ public class FileEngine implements DownloadService {
         this.importFile(is, clazz, fileName, consumer, null);
     }
 
-    /**
-     * 支持传入自定义校验策略 和 分组校验(groups) 的终极方法
-     */
     public <T> void importFile(InputStream is, Class<T> clazz, String fileName,
                                Consumer<List<T>> consumer,
                                ExcelValidationHandler<T> validationHandler,
