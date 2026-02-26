@@ -12,17 +12,19 @@ import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.util.ConcurrentReferenceHashMap;
 import org.springframework.util.ReflectionUtils;
 
 import java.lang.reflect.Field;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 @Slf4j
 public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
-    private static final Map<Class<?>, SheetContextFields> FIELD_CACHE = new ConcurrentHashMap<>();
+    // ✨ 终极优化 1：使用 Spring 底层的 ConcurrentReferenceHashMap (弱引用/软引用)
+    // 彻底解决由于静态 Map 强引用 Class 对象导致的 JVM Metaspace 内存泄漏问题！
+    private static final Map<Class<?>, SheetContextFields> FIELD_CACHE = new ConcurrentReferenceHashMap<>();
 
     private static class SheetContextFields {
         Field sheetNoField;
@@ -115,8 +117,25 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
                     return;
                 }
             } else {
-                String errorMsg = violations.iterator().next().getMessage();
-                throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行数据校验失败: " + errorMsg);
+                ConstraintViolation<T> firstViolation = violations.iterator().next();
+                String errorMsg = firstViolation.getMessage();
+
+                // ✨ 终极优化 2：根据错误字段名反推 Excel 中文表头名，让提示“说人话”
+                String propertyPath = firstViolation.getPropertyPath().toString();
+                String headName = propertyPath; // 默认使用英文字段名兜底
+                if (colIndexToFieldMap != null) {
+                    for (Map.Entry<Integer, Field> entry : colIndexToFieldMap.entrySet()) {
+                        if (entry.getValue().getName().equals(propertyPath)) {
+                            Map<Integer, Head> headMap = context.currentReadHolder().excelReadHeadProperty().getHeadMap();
+                            Head head = headMap != null ? headMap.get(entry.getKey()) : null;
+                            if (head != null && !head.getHeadNameList().isEmpty()) {
+                                headName = head.getHeadNameList().get(head.getHeadNameList().size() - 1);
+                            }
+                            break;
+                        }
+                    }
+                }
+                throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行数据校验失败: 【" + headName + "】" + errorMsg);
             }
         }
         cachedDataList.add(data);
@@ -144,7 +163,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             String sheetName = context.readSheetHolder().getSheetName();
             String badData = ex.getCellData().getStringValue();
 
-            // 提取真正的中文表头名称，让异常提示“说人话”
             Map<Integer, Head> headMap = context.currentReadHolder().excelReadHeadProperty().getHeadMap();
             Head head = headMap != null ? headMap.get(colIndex) : null;
             String headName = (head != null && !head.getHeadNameList().isEmpty())

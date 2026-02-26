@@ -47,14 +47,22 @@ public class FileEngine implements DownloadService {
         }
     }
 
-    /**
-     * 暴露给业务线的：纯动态无 DTO 数据导出
-     */
     public void exportDynamicData(HttpServletResponse response, String fileName, List<List<String>> headers, List<List<Object>> data) {
         try {
             exportDynamicExcel(response, fileName, headers, data);
         } catch (Exception e) {
             throw new GearFileException("动态数据导出失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 暴露给业务线：纯动态分页防 OOM 导出
+     */
+    public void exportBigDynamicData(HttpServletResponse response, String fileName, List<List<String>> headers, Function<Integer, List<List<Object>>> pageDataSupplier) {
+        try {
+            exportBigDynamicExcel(response, fileName, headers, pageDataSupplier);
+        } catch (Exception e) {
+            throw new GearFileException("动态分页数据导出失败: " + e.getMessage(), e);
         }
     }
 

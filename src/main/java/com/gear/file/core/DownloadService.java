@@ -46,9 +46,6 @@ public interface DownloadService {
         }
     }
 
-    /**
-     * 纯动态表头导出 (无需 DTO，适用于自定义台账、大盘数据导出)
-     */
     default void exportDynamicExcel(HttpServletResponse resp, String showFileName,
                                     List<List<String>> headers, List<List<Object>> data) throws IOException {
         setExcelResponseHeader(resp, showFileName);
@@ -58,8 +55,28 @@ public interface DownloadService {
                 .doWrite(data);
     }
 
+    /**
+     * ✨ 终极优化 3：新增 纯动态表头 + 分页防OOM 导出 (大盘/动态台账的大杀器)
+     */
+    default void exportBigDynamicExcel(HttpServletResponse resp, String showFileName,
+                                       List<List<String>> headers,
+                                       Function<Integer, List<List<Object>>> pageDataSupplier) throws IOException {
+        setExcelResponseHeader(resp, showFileName);
+        try (ExcelWriter excelWriter = EasyExcel.write(resp.getOutputStream()).head(headers).build()) {
+            WriteSheet writeSheet = EasyExcel.writerSheet("Sheet1").build();
+            int page = 1;
+            while (true) {
+                List<List<Object>> dataList = pageDataSupplier.apply(page);
+                if (dataList == null || dataList.isEmpty()) {
+                    break;
+                }
+                excelWriter.write(dataList, writeSheet);
+                page++;
+            }
+        }
+    }
+
     private void setExcelResponseHeader(HttpServletResponse resp, String showFileName) throws IOException {
-        // 替换 "+" 为 "%20"，彻底解决文件名带空格变成加号的 Web 历史遗留 Bug
         String encodedFileName = URLEncoder.encode(showFileName, StandardCharsets.UTF_8).replace("+", "%20");
         resp.setCharacterEncoding(StandardCharsets.UTF_8.name());
         resp.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");

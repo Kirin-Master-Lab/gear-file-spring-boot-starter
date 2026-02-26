@@ -10,9 +10,9 @@ import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,16 +32,18 @@ public class EasyExcelReaderUtil {
                                             Validator validator,
                                             Class<?>... groups) {
         int headRowNumber = (headRow == null) ? 1 : headRow;
-        File tempFile = null;
+
+        // ✨ 终极优化 4：全面拥抱 NIO.2 临时文件，堵住越权读取安全漏洞
+        Path tempFile = null;
 
         try (InputStream autoCloseIs = is) {
-            tempFile = File.createTempFile("gear-excel-", ".tmp");
-            Files.copy(autoCloseIs, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            tempFile = Files.createTempFile("gear-excel-", ".tmp");
+            Files.copy(autoCloseIs, tempFile, StandardCopyOption.REPLACE_EXISTING);
 
             Map<Integer, List<CellExtra>> sheetMergeRegions = new HashMap<>();
 
             if (enableMerge) {
-                EasyExcel.read(tempFile, clazz, new ReadListener<T>() {
+                EasyExcel.read(tempFile.toFile(), clazz, new ReadListener<T>() {
                             @Override
                             public void invoke(T data, AnalysisContext context) {}
                             @Override
@@ -59,7 +61,7 @@ public class EasyExcelReaderUtil {
             }
 
             SmartExcelListener<T> listener = new SmartExcelListener<>(clazz, consumer, sheetMergeRegions, batchSize, validationHandler, validator, groups);
-            EasyExcel.read(tempFile, clazz, listener)
+            EasyExcel.read(tempFile.toFile(), clazz, listener)
                     .headRowNumber(headRowNumber)
                     .doReadAll();
 
@@ -69,9 +71,12 @@ public class EasyExcelReaderUtil {
             }
             throw new GearFileException("Excel 解析失败: " + e.getMessage(), e);
         } finally {
-            if (tempFile != null && tempFile.exists()) {
-                if (!tempFile.delete()) {
-                    log.warn("Excel 临时文件常规删除失败: {}", tempFile.getAbsolutePath());
+            if (tempFile != null) {
+                try {
+                    // 安全的 NIO 删除操作
+                    Files.deleteIfExists(tempFile);
+                } catch (Exception e) {
+                    log.warn("Excel NIO临时文件删除失败: {}", tempFile.toAbsolutePath());
                 }
             }
         }
