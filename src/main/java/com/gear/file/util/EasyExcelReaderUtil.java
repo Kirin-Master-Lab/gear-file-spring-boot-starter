@@ -9,11 +9,14 @@ import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.ExcelValidationHandler;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -21,56 +24,49 @@ public class EasyExcelReaderUtil {
 
     private EasyExcelReaderUtil() {}
 
-    /**
-     * 高级流式解析：支持防OOM + 合并单元格打平 + JSR303校验
-     */
     public static <T> void readWithCallback(InputStream is, Class<T> clazz,
                                             Consumer<List<T>> consumer, Integer headRow,
                                             ExcelValidationHandler<T> validationHandler) {
         int headRowNumber = (headRow == null) ? 1 : headRow;
+        File tempFile = null;
 
         try {
-            // 将流转为字节数组以支持两次读取 (注：如果预期单文件超过 500MB，建议入参改为 java.io.File 避免吃内存)
-            byte[] streamBytes = toByteArray(is);
+            tempFile = File.createTempFile("gear-excel-", ".tmp");
+            Files.copy(is, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
-            // Pass 1: 极速读取，只缓存合并规则
-            List<CellExtra> mergeRegions = new ArrayList<>();
-            try (InputStream pass1Stream = new ByteArrayInputStream(streamBytes)) {
-                EasyExcel.read(pass1Stream, clazz, new ReadListener<T>() {
-                    @Override
-                    public void invoke(T data, AnalysisContext context) {}
-                    @Override
-                    public void doAfterAllAnalysed(AnalysisContext context) {}
-                    @Override
-                    public void extra(CellExtra extra, AnalysisContext context) {
-                        if (extra.getType() == CellExtraTypeEnum.MERGE) {
-                            mergeRegions.add(extra);
-                        }
+            // Pass 1: 极速读取临时文件，按 SheetNo 缓存合并规则
+            // 数据结构变更为：Map<SheetNo, 合并规则列表>
+            Map<Integer, List<CellExtra>> sheetMergeRegions = new HashMap<>();
+
+            EasyExcel.read(tempFile, clazz, new ReadListener<T>() {
+                @Override
+                public void invoke(T data, AnalysisContext context) {}
+                @Override
+                public void doAfterAllAnalysed(AnalysisContext context) {}
+                @Override
+                public void extra(CellExtra extra, AnalysisContext context) {
+                    if (extra.getType() == CellExtraTypeEnum.MERGE) {
+                        // 获取当前合并规则属于哪个 Sheet
+                        Integer sheetNo = context.readSheetHolder().getSheetNo();
+                        sheetMergeRegions.computeIfAbsent(sheetNo, k -> new ArrayList<>()).add(extra);
                     }
-                }).extraRead(CellExtraTypeEnum.MERGE).sheet().headRowNumber(headRowNumber).doRead();
-            }
+                }
+            }).extraRead(CellExtraTypeEnum.MERGE).doReadAll(); // 改为 doReadAll()，扫描所有 Sheet
 
-            // Pass 2: 正式数据流式读取
-            try (InputStream pass2Stream = new ByteArrayInputStream(streamBytes)) {
-                SmartExcelListener<T> listener = new SmartExcelListener<>(consumer, mergeRegions,validationHandler);
-                EasyExcel.read(pass2Stream, clazz, listener)
-                        .sheet()
-                        .headRowNumber(headRowNumber)
-                        .doRead();
-            }
+            // Pass 2: 正式流式读取所有 Sheet 数据
+            SmartExcelListener<T> listener = new SmartExcelListener<>(consumer, sheetMergeRegions, validationHandler);
+            EasyExcel.read(tempFile, clazz, listener)
+                    .headRowNumber(headRowNumber)
+                    .doReadAll(); // 改为 doReadAll()
 
         } catch (Exception e) {
             throw new GearFileException("Excel 解析失败: " + e.getMessage(), e);
+        } finally {
+            if (tempFile != null && tempFile.exists()) {
+                if (!tempFile.delete()) {
+                    log.warn("Excel 临时文件删除失败: {}", tempFile.getAbsolutePath());
+                }
+            }
         }
-    }
-
-    private static byte[] toByteArray(InputStream in) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buffer = new byte[8192];
-        int n;
-        while ((n = in.read(buffer)) != -1) {
-            out.write(buffer, 0, n);
-        }
-        return out.toByteArray();
     }
 }

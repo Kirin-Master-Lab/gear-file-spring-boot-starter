@@ -3,6 +3,7 @@ package com.gear.file.util;
 import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.event.AnalysisEventListener;
 import com.alibaba.excel.metadata.CellExtra;
+import com.alibaba.excel.metadata.Head;
 import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.ConstraintViolation;
@@ -18,52 +19,60 @@ import java.util.function.Consumer;
 @Slf4j
 public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
-    private static final int BATCH_COUNT = 1000; // 批处理阈值
+    private static final int BATCH_COUNT = 1000;
+    private static final Validator VALIDATOR = Validation.buildDefaultValidatorFactory().getValidator();
+
     private List<T> cachedDataList = new ArrayList<>(BATCH_COUNT);
-
     private final Consumer<List<T>> consumer;
-    private final List<CellExtra> mergeRegions;
-    private final Validator validator;
-
-    // 缓存合并单元格首行的值
-    private final Map<Integer, Object> mergeDataCache = new HashMap<>();
-    private Field[] declaredFields;
-
     private final ExcelValidationHandler<T> validationHandler;
 
+    // 变更为接收带 Sheet 隔离的合并规则 Map
+    private final Map<Integer, List<CellExtra>> sheetMergeRegions;
+
+    private final Map<Integer, Object> mergeDataCache = new HashMap<>();
+    private Map<Integer, Field> colIndexToFieldMap;
+
+    // 新增：记录当前正在解析的 SheetNo，用于感知 Sheet 切换
+    private Integer currentSheetNo;
+
     public SmartExcelListener(Consumer<List<T>> consumer,
-                              List<CellExtra> mergeRegions,
+                              Map<Integer, List<CellExtra>> sheetMergeRegions,
                               ExcelValidationHandler<T> validationHandler) {
         this.consumer = consumer;
-        this.mergeRegions = mergeRegions != null ? mergeRegions : new ArrayList<>();
+        this.sheetMergeRegions = sheetMergeRegions != null ? sheetMergeRegions : new HashMap<>();
         this.validationHandler = validationHandler;
-        this.validator = Validation.buildDefaultValidatorFactory().getValidator();
     }
 
     @Override
     public void invoke(T data, AnalysisContext context) {
         int rowIndex = context.readRowHolder().getRowIndex();
+        Integer sheetNo = context.readSheetHolder().getSheetNo();
 
-        if (declaredFields == null) {
-            declaredFields = data.getClass().getDeclaredFields();
+        // 【关键防串数据逻辑】如果切换了 Sheet，必须清空上一页的合并单元格缓存与表头缓存
+        if (currentSheetNo == null || !currentSheetNo.equals(sheetNo)) {
+            mergeDataCache.clear();
+            colIndexToFieldMap = null; // 让新 Sheet 重新加载表头映射
+            currentSheetNo = sheetNo;
         }
 
-        // 1. 实时打平合并单元格数据
-        fillMergeData(data, rowIndex);
+        if (colIndexToFieldMap == null) {
+            initColIndexToFieldMap(context);
+        }
+
+        // 1. 实时打平当前 Sheet 的合并单元格数据
+        fillMergeData(data, rowIndex, sheetNo);
 
         // 2. JSR-303 数据校验
-        Set<ConstraintViolation<T>> violations = validator.validate(data);
+        Set<ConstraintViolation<T>> violations = VALIDATOR.validate(data);
         if (!violations.isEmpty()) {
             if (validationHandler != null) {
-                // 将决定权交给外部调用方
                 boolean keep = validationHandler.onValidateFail(data, rowIndex, violations);
                 if (!keep) {
-                    return; // 外部决定丢弃该条数据，直接 return 结束当前行的处理
+                    return;
                 }
             } else {
-                // 组件默认行为：严格模式，快速失败，抛出异常中断解析
                 String errorMsg = violations.iterator().next().getMessage();
-                throw new GearFileException("第 " + (rowIndex + 1) + " 行数据校验失败: " + errorMsg);
+                throw new GearFileException("Sheet[" + sheetNo + "] 第 " + (rowIndex + 1) + " 行数据校验失败: " + errorMsg);
             }
         }
         cachedDataList.add(data);
@@ -77,15 +86,32 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     @Override
     public void doAfterAllAnalysed(AnalysisContext context) {
+        // doAfterAllAnalysed 会在每个 Sheet 解析结束时调用一次
         if (!cachedDataList.isEmpty()) {
             consumer.accept(cachedDataList);
+            // 务必清空，防止把前一个 Sheet 剩余的数据带到下一个 Sheet
+            cachedDataList = new ArrayList<>(BATCH_COUNT);
         }
     }
 
-    private void fillMergeData(T data, int rowIndex) {
-        if (mergeRegions.isEmpty()) return;
+    private void initColIndexToFieldMap(AnalysisContext context) {
+        colIndexToFieldMap = new HashMap<>();
+        Map<Integer, Head> headMap = context.currentReadHolder().excelReadHeadProperty().getHeadMap();
+        for (Map.Entry<Integer, Head> entry : headMap.entrySet()) {
+            Field field = entry.getValue().getField();
+            if (field != null) {
+                ReflectionUtils.makeAccessible(field);
+                colIndexToFieldMap.put(entry.getKey(), field);
+            }
+        }
+    }
 
-        for (CellExtra extra : mergeRegions) {
+    private void fillMergeData(T data, int rowIndex, Integer sheetNo) {
+        // 获取当前 Sheet 专属的合并规则
+        List<CellExtra> currentSheetMerges = sheetMergeRegions.get(sheetNo);
+        if (currentSheetMerges == null || currentSheetMerges.isEmpty()) return;
+
+        for (CellExtra extra : currentSheetMerges) {
             int firstRow = extra.getFirstRowIndex();
             int lastRow = extra.getLastRowIndex();
             int colIndex = extra.getFirstColumnIndex();
@@ -101,18 +127,16 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
     }
 
     private Object getFieldValue(T data, int colIndex) {
-        if (colIndex < declaredFields.length) {
-            Field field = declaredFields[colIndex];
-            ReflectionUtils.makeAccessible(field);
+        Field field = colIndexToFieldMap.get(colIndex);
+        if (field != null) {
             return ReflectionUtils.getField(field, data);
         }
         return null;
     }
 
     private void setFieldValue(T data, int colIndex, Object value) {
-        if (colIndex < declaredFields.length) {
-            Field field = declaredFields[colIndex];
-            ReflectionUtils.makeAccessible(field);
+        Field field = colIndexToFieldMap.get(colIndex);
+        if (field != null) {
             ReflectionUtils.setField(field, data, value);
         }
     }
