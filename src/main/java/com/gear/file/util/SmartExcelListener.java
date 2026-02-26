@@ -163,16 +163,25 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             String sheetName = context.readSheetHolder().getSheetName();
             String badData = ex.getCellData().getStringValue();
 
+            // 提取真正的中文表头名称
             Map<Integer, Head> headMap = context.currentReadHolder().excelReadHeadProperty().getHeadMap();
             Head head = headMap != null ? headMap.get(colIndex) : null;
             String headName = (head != null && !head.getHeadNameList().isEmpty())
                     ? head.getHeadNameList().get(head.getHeadNameList().size() - 1)
                     : "第 " + (colIndex + 1) + " 列";
 
-            String errorMsg = String.format("【%s】 数据格式不正确，无法解析输入的内容: '%s'", headName, badData);
-            throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行，" + errorMsg);
+            // ✨ 将异常处理权交还给业务方
+            if (validationHandler != null) {
+                validationHandler.onConvertException(rowIndex, colIndex, sheetName, headName, badData, ex);
+            } else {
+                // 如果调用方没有传 Handler，走默认的兜底抛错逻辑
+                String errorMsg = String.format("【%s】 数据格式不正确，无法解析输入的内容: '%s'", headName, badData);
+                throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行，" + errorMsg);
+            }
+        } else {
+            // 其他未知底层异常，直接抛出
+            throw exception;
         }
-        throw exception;
     }
 
     private void initColIndexToFieldMap(AnalysisContext context) {
