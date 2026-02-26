@@ -27,7 +27,7 @@ public class EasyExcelReaderUtil {
 
     public static <T> void readWithCallback(InputStream is, Class<T> clazz,
                                             Consumer<List<T>> consumer, Integer headRow,
-                                            boolean enableMerge,
+                                            boolean enableMerge, int batchSize,
                                             ExcelValidationHandler<T> validationHandler,
                                             Validator validator,
                                             Class<?>... groups) {
@@ -54,17 +54,16 @@ public class EasyExcelReaderUtil {
                                 }
                             }
                         }).extraRead(CellExtraTypeEnum.MERGE)
-                        .headRowNumber(headRowNumber) // ✨ 优化点 4：为预扫描加固，防止长图表或乱码表头导致异常
+                        .headRowNumber(headRowNumber)
                         .doReadAll();
             }
 
-            SmartExcelListener<T> listener = new SmartExcelListener<>(clazz, consumer, sheetMergeRegions, validationHandler, validator, groups);
+            SmartExcelListener<T> listener = new SmartExcelListener<>(clazz, consumer, sheetMergeRegions, batchSize, validationHandler, validator, groups);
             EasyExcel.read(tempFile, clazz, listener)
                     .headRowNumber(headRowNumber)
                     .doReadAll();
 
         } catch (Exception e) {
-            // 这里我们不再笼统抛错，如果已经是业务级异常则直接抛出，保留人话提示
             if (e instanceof GearFileException || e.getCause() instanceof GearFileException) {
                 throw (RuntimeException) (e instanceof GearFileException ? e : e.getCause());
             }

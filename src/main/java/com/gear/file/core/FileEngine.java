@@ -31,8 +31,6 @@ public class FileEngine implements DownloadService {
         }
     }
 
-    // ================== 新增的导出 API ==================
-
     public <T> void exportData(HttpServletResponse response, Class<T> clazz, List<T> data) {
         try {
             exportExcel(response, getShowName(clazz), clazz, data);
@@ -49,12 +47,21 @@ public class FileEngine implements DownloadService {
         }
     }
 
+    /**
+     * 暴露给业务线的：纯动态无 DTO 数据导出
+     */
+    public void exportDynamicData(HttpServletResponse response, String fileName, List<List<String>> headers, List<List<Object>> data) {
+        try {
+            exportDynamicExcel(response, fileName, headers, data);
+        } catch (Exception e) {
+            throw new GearFileException("动态数据导出失败: " + e.getMessage(), e);
+        }
+    }
+
     private String getShowName(Class<?> clazz) {
         FileModel anno = clazz.getAnnotation(FileModel.class);
         return (anno != null && !anno.showName().isEmpty()) ? anno.showName() : "导出数据";
     }
-
-    // ================== 导入 API 保持不变 ==================
 
     public <T> List<T> importFileSync(InputStream is, Class<T> clazz, String fileName) {
         List<T> allData = new ArrayList<>();

@@ -24,13 +24,15 @@ public class ExcelFileParser implements FileParser {
                           ExcelValidationHandler<T> validationHandler, Validator validator, Class<?>... groups) {
         int headRow = 1;
         boolean enableMerge = false;
+        int batchSize = 1000;
 
         FileModel anno = clazz.getAnnotation(FileModel.class);
         if (anno != null) {
             headRow = anno.headRowNumber();
-            enableMerge = anno.enableMerge(); // 读取合并开关
+            enableMerge = anno.enableMerge();
+            batchSize = anno.batchSize();
         }
 
-        EasyExcelReaderUtil.readWithCallback(is, clazz, consumer, headRow, enableMerge, validationHandler, validator, groups);
+        EasyExcelReaderUtil.readWithCallback(is, clazz, consumer, headRow, enableMerge, batchSize, validationHandler, validator, groups);
     }
 }

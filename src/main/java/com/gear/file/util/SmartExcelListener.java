@@ -22,9 +22,6 @@ import java.util.function.Consumer;
 @Slf4j
 public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
-    private static final int BATCH_COUNT = 1000;
-
-    // ✨ 优化点 3：引入全局并发字典缓存，消除每次 new Listener 时的重复反射损耗
     private static final Map<Class<?>, SheetContextFields> FIELD_CACHE = new ConcurrentHashMap<>();
 
     private static class SheetContextFields {
@@ -32,7 +29,8 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         Field sheetNameField;
     }
 
-    private List<T> cachedDataList = new ArrayList<>(BATCH_COUNT);
+    private List<T> cachedDataList;
+    private final int batchSize;
     private final Class<T> clazz;
     private final Consumer<List<T>> consumer;
     private final ExcelValidationHandler<T> validationHandler;
@@ -49,11 +47,14 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     public SmartExcelListener(Class<T> clazz, Consumer<List<T>> consumer,
                               Map<Integer, List<CellExtra>> sheetMergeRegions,
+                              int batchSize,
                               ExcelValidationHandler<T> validationHandler,
                               Validator validator, Class<?>... groups) {
         this.clazz = clazz;
         this.consumer = consumer;
         this.sheetMergeRegions = sheetMergeRegions != null ? sheetMergeRegions : new HashMap<>();
+        this.batchSize = batchSize > 0 ? batchSize : 1000;
+        this.cachedDataList = new ArrayList<>(this.batchSize);
         this.validationHandler = validationHandler;
         this.validator = validator;
         this.groups = groups;
@@ -61,9 +62,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         initSheetContextFields();
     }
 
-    /**
-     * O(1) 极速获取上下文注入字段
-     */
     private void initSheetContextFields() {
         SheetContextFields contextFields = FIELD_CACHE.computeIfAbsent(clazz, k -> {
             SheetContextFields fields = new SheetContextFields();
@@ -123,9 +121,9 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         }
         cachedDataList.add(data);
 
-        if (cachedDataList.size() >= BATCH_COUNT) {
+        if (cachedDataList.size() >= batchSize) {
             consumer.accept(cachedDataList);
-            cachedDataList = new ArrayList<>(BATCH_COUNT);
+            cachedDataList = new ArrayList<>(batchSize);
         }
     }
 
@@ -133,14 +131,10 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
     public void doAfterAllAnalysed(AnalysisContext context) {
         if (!cachedDataList.isEmpty()) {
             consumer.accept(cachedDataList);
-            cachedDataList = new ArrayList<>(BATCH_COUNT);
+            cachedDataList = new ArrayList<>(batchSize);
         }
     }
 
-    /**
-     * ✨ 优化点 1：重写 onException 捕获类型转换死角
-     * 当 Excel 中的内容 (例如："二十") 无法转换为 DTO 字段类型 (例如：Integer) 时触发。
-     */
     @Override
     public void onException(Exception exception, AnalysisContext context) throws Exception {
         if (exception instanceof ExcelDataConvertException) {
@@ -150,13 +144,16 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             String sheetName = context.readSheetHolder().getSheetName();
             String badData = ex.getCellData().getStringValue();
 
-            // 翻译底层异常为人话
-            String errorMsg = String.format("数据类型转换失败！输入的内容 '%s' 格式不正确", badData);
+            // 提取真正的中文表头名称，让异常提示“说人话”
+            Map<Integer, Head> headMap = context.currentReadHolder().excelReadHeadProperty().getHeadMap();
+            Head head = headMap != null ? headMap.get(colIndex) : null;
+            String headName = (head != null && !head.getHeadNameList().isEmpty())
+                    ? head.getHeadNameList().get(head.getHeadNameList().size() - 1)
+                    : "第 " + (colIndex + 1) + " 列";
 
-            // 抛出友好的业务异常中断解析
-            throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行，第 " + (colIndex + 1) + " 列" + errorMsg);
+            String errorMsg = String.format("【%s】 数据格式不正确，无法解析输入的内容: '%s'", headName, badData);
+            throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行，" + errorMsg);
         }
-        // 如果是其他底层致命异常，继续往外抛出
         throw exception;
     }
 
