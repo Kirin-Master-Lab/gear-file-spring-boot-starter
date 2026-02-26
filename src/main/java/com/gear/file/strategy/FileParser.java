@@ -10,5 +10,5 @@ public interface FileParser {
     boolean support(String suffix);
 
     <T> void parse(InputStream is, Class<T> clazz, Consumer<List<T>> consumer,
-                   ExcelValidationHandler<T> validationHandler, Validator validator);
+                   ExcelValidationHandler<T> validationHandler, Validator validator, Class<?>... groups);
 }

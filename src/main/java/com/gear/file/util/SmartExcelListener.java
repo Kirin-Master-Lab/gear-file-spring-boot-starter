@@ -4,6 +4,8 @@ import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.event.AnalysisEventListener;
 import com.alibaba.excel.metadata.CellExtra;
 import com.alibaba.excel.metadata.Head;
+import com.gear.file.annotation.ExcelSheetName;
+import com.gear.file.annotation.ExcelSheetNo;
 import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.ConstraintViolation;
@@ -21,11 +23,11 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
     private static final int BATCH_COUNT = 1000;
 
     private List<T> cachedDataList = new ArrayList<>(BATCH_COUNT);
+    private final Class<T> clazz;
     private final Consumer<List<T>> consumer;
     private final ExcelValidationHandler<T> validationHandler;
-
-    // 优化点 3：接收 Spring 容器管理的 Validator，完美支持自定义注解中的依赖注入
     private final Validator validator;
+    private final Class<?>[] groups; // 保存校验分组
 
     private final Map<Integer, List<CellExtra>> sheetMergeRegions;
     private final Map<Integer, Object> mergeDataCache = new HashMap<>();
@@ -33,20 +35,42 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     private Integer currentSheetNo;
 
-    public SmartExcelListener(Consumer<List<T>> consumer,
+    // Sheet 上下文注入字段缓存
+    private Field sheetNoField;
+    private Field sheetNameField;
+
+    public SmartExcelListener(Class<T> clazz, Consumer<List<T>> consumer,
                               Map<Integer, List<CellExtra>> sheetMergeRegions,
                               ExcelValidationHandler<T> validationHandler,
-                              Validator validator) {
+                              Validator validator, Class<?>... groups) {
+        this.clazz = clazz;
         this.consumer = consumer;
         this.sheetMergeRegions = sheetMergeRegions != null ? sheetMergeRegions : new HashMap<>();
         this.validationHandler = validationHandler;
         this.validator = validator;
+        this.groups = groups;
+
+        initSheetContextFields(); // 初始化上下文注解字段
+    }
+
+    private void initSheetContextFields() {
+        ReflectionUtils.doWithFields(clazz, field -> {
+            if (field.isAnnotationPresent(ExcelSheetNo.class)) {
+                ReflectionUtils.makeAccessible(field);
+                sheetNoField = field;
+            }
+            if (field.isAnnotationPresent(ExcelSheetName.class)) {
+                ReflectionUtils.makeAccessible(field);
+                sheetNameField = field;
+            }
+        });
     }
 
     @Override
     public void invoke(T data, AnalysisContext context) {
         int rowIndex = context.readRowHolder().getRowIndex();
         Integer sheetNo = context.readSheetHolder().getSheetNo();
+        String sheetName = context.readSheetHolder().getSheetName();
 
         if (currentSheetNo == null || !currentSheetNo.equals(sheetNo)) {
             mergeDataCache.clear();
@@ -58,9 +82,19 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             initColIndexToFieldMap(context);
         }
 
+        // 1. 注入 Sheet 上下文信息
+        if (sheetNoField != null) {
+            ReflectionUtils.setField(sheetNoField, data, sheetNo);
+        }
+        if (sheetNameField != null) {
+            ReflectionUtils.setField(sheetNameField, data, sheetName);
+        }
+
+        // 2. 填充合并数据
         fillMergeData(data, rowIndex, sheetNo);
 
-        Set<ConstraintViolation<T>> violations = validator.validate(data);
+        // 3. JSR-303 分组校验
+        Set<ConstraintViolation<T>> violations = validator.validate(data, groups);
         if (!violations.isEmpty()) {
             if (validationHandler != null) {
                 boolean keep = validationHandler.onValidateFail(data, rowIndex, violations);
@@ -69,7 +103,7 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
                 }
             } else {
                 String errorMsg = violations.iterator().next().getMessage();
-                throw new GearFileException("Sheet[" + sheetNo + "] 第 " + (rowIndex + 1) + " 行数据校验失败: " + errorMsg);
+                throw new GearFileException("Sheet[" + sheetName + "] 第 " + (rowIndex + 1) + " 行数据校验失败: " + errorMsg);
             }
         }
         cachedDataList.add(data);
@@ -117,8 +151,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
                 if (cachedValue != null) {
                     setFieldValue(data, colIndex, cachedValue);
                 } else {
-                    // 优化点 4：极端场景兜底。如果未拿到缓存(可能首行跨越了表头，或者首行是空值被EasyExcel跳过)
-                    // 则将当前触碰到的第一行非空值作为该合并区域的基准值放入缓存。
                     Object currentValue = getFieldValue(data, colIndex);
                     if (currentValue != null) {
                         mergeDataCache.put(colIndex, currentValue);

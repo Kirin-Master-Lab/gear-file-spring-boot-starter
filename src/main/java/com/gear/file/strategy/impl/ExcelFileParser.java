@@ -21,12 +21,16 @@ public class ExcelFileParser implements FileParser {
 
     @Override
     public <T> void parse(InputStream is, Class<T> clazz, Consumer<List<T>> consumer,
-                          ExcelValidationHandler<T> validationHandler, Validator validator) {
+                          ExcelValidationHandler<T> validationHandler, Validator validator, Class<?>... groups) {
         int headRow = 1;
+        boolean enableMerge = false;
+
         FileModel anno = clazz.getAnnotation(FileModel.class);
         if (anno != null) {
             headRow = anno.headRowNumber();
+            enableMerge = anno.enableMerge(); // 读取合并开关
         }
-        EasyExcelReaderUtil.readWithCallback(is, clazz, consumer, headRow, validationHandler, validator);
+
+        EasyExcelReaderUtil.readWithCallback(is, clazz, consumer, headRow, enableMerge, validationHandler, validator, groups);
     }
 }

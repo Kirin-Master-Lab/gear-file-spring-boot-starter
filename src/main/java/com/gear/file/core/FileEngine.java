@@ -19,7 +19,7 @@ import java.util.function.Consumer;
 public class FileEngine implements DownloadService {
 
     private final List<FileParser> parsers;
-    private final Validator validator; // 接收 Spring 容器的 Validator
+    private final Validator validator;
 
     public void downloadTemplate(HttpServletResponse response, Class<?> clazz) {
         String showName = "导入模板";
@@ -45,11 +45,14 @@ public class FileEngine implements DownloadService {
         this.importFile(is, clazz, fileName, consumer, null);
     }
 
+    /**
+     * 支持传入自定义校验策略 和 分组校验(groups) 的终极方法
+     */
     public <T> void importFile(InputStream is, Class<T> clazz, String fileName,
                                Consumer<List<T>> consumer,
-                               ExcelValidationHandler<T> validationHandler) {
-        // 透传 validator 给底层
-        this.getParser(fileName).parse(is, clazz, consumer, validationHandler, validator);
+                               ExcelValidationHandler<T> validationHandler,
+                               Class<?>... groups) {
+        this.getParser(fileName).parse(is, clazz, consumer, validationHandler, validator, groups);
     }
 
     private FileParser getParser(String fileName) {
