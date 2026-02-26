@@ -7,7 +7,6 @@ import com.alibaba.excel.metadata.Head;
 import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.ExcelValidationHandler;
 import jakarta.validation.ConstraintViolation;
-import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.ReflectionUtils;
@@ -20,27 +19,28 @@ import java.util.function.Consumer;
 public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     private static final int BATCH_COUNT = 1000;
-    private static final Validator VALIDATOR = Validation.buildDefaultValidatorFactory().getValidator();
 
     private List<T> cachedDataList = new ArrayList<>(BATCH_COUNT);
     private final Consumer<List<T>> consumer;
     private final ExcelValidationHandler<T> validationHandler;
 
-    // 变更为接收带 Sheet 隔离的合并规则 Map
-    private final Map<Integer, List<CellExtra>> sheetMergeRegions;
+    // 优化点 3：接收 Spring 容器管理的 Validator，完美支持自定义注解中的依赖注入
+    private final Validator validator;
 
+    private final Map<Integer, List<CellExtra>> sheetMergeRegions;
     private final Map<Integer, Object> mergeDataCache = new HashMap<>();
     private Map<Integer, Field> colIndexToFieldMap;
 
-    // 新增：记录当前正在解析的 SheetNo，用于感知 Sheet 切换
     private Integer currentSheetNo;
 
     public SmartExcelListener(Consumer<List<T>> consumer,
                               Map<Integer, List<CellExtra>> sheetMergeRegions,
-                              ExcelValidationHandler<T> validationHandler) {
+                              ExcelValidationHandler<T> validationHandler,
+                              Validator validator) {
         this.consumer = consumer;
         this.sheetMergeRegions = sheetMergeRegions != null ? sheetMergeRegions : new HashMap<>();
         this.validationHandler = validationHandler;
+        this.validator = validator;
     }
 
     @Override
@@ -48,10 +48,9 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         int rowIndex = context.readRowHolder().getRowIndex();
         Integer sheetNo = context.readSheetHolder().getSheetNo();
 
-        // 【关键防串数据逻辑】如果切换了 Sheet，必须清空上一页的合并单元格缓存与表头缓存
         if (currentSheetNo == null || !currentSheetNo.equals(sheetNo)) {
             mergeDataCache.clear();
-            colIndexToFieldMap = null; // 让新 Sheet 重新加载表头映射
+            colIndexToFieldMap = null;
             currentSheetNo = sheetNo;
         }
 
@@ -59,11 +58,9 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
             initColIndexToFieldMap(context);
         }
 
-        // 1. 实时打平当前 Sheet 的合并单元格数据
         fillMergeData(data, rowIndex, sheetNo);
 
-        // 2. JSR-303 数据校验
-        Set<ConstraintViolation<T>> violations = VALIDATOR.validate(data);
+        Set<ConstraintViolation<T>> violations = validator.validate(data);
         if (!violations.isEmpty()) {
             if (validationHandler != null) {
                 boolean keep = validationHandler.onValidateFail(data, rowIndex, violations);
@@ -77,7 +74,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
         }
         cachedDataList.add(data);
 
-        // 3. 防 OOM 批处理
         if (cachedDataList.size() >= BATCH_COUNT) {
             consumer.accept(cachedDataList);
             cachedDataList = new ArrayList<>(BATCH_COUNT);
@@ -86,10 +82,8 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
 
     @Override
     public void doAfterAllAnalysed(AnalysisContext context) {
-        // doAfterAllAnalysed 会在每个 Sheet 解析结束时调用一次
         if (!cachedDataList.isEmpty()) {
             consumer.accept(cachedDataList);
-            // 务必清空，防止把前一个 Sheet 剩余的数据带到下一个 Sheet
             cachedDataList = new ArrayList<>(BATCH_COUNT);
         }
     }
@@ -107,7 +101,6 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
     }
 
     private void fillMergeData(T data, int rowIndex, Integer sheetNo) {
-        // 获取当前 Sheet 专属的合并规则
         List<CellExtra> currentSheetMerges = sheetMergeRegions.get(sheetNo);
         if (currentSheetMerges == null || currentSheetMerges.isEmpty()) return;
 
@@ -121,7 +114,16 @@ public class SmartExcelListener<T> extends AnalysisEventListener<T> {
                 if (value != null) mergeDataCache.put(colIndex, value);
             } else if (rowIndex > firstRow && rowIndex <= lastRow) {
                 Object cachedValue = mergeDataCache.get(colIndex);
-                if (cachedValue != null) setFieldValue(data, colIndex, cachedValue);
+                if (cachedValue != null) {
+                    setFieldValue(data, colIndex, cachedValue);
+                } else {
+                    // 优化点 4：极端场景兜底。如果未拿到缓存(可能首行跨越了表头，或者首行是空值被EasyExcel跳过)
+                    // 则将当前触碰到的第一行非空值作为该合并区域的基准值放入缓存。
+                    Object currentValue = getFieldValue(data, colIndex);
+                    if (currentValue != null) {
+                        mergeDataCache.put(colIndex, currentValue);
+                    }
+                }
             }
         }
     }

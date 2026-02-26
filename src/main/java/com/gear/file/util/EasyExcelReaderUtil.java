@@ -7,6 +7,7 @@ import com.alibaba.excel.metadata.CellExtra;
 import com.alibaba.excel.read.listener.ReadListener;
 import com.gear.file.exception.GearFileException;
 import com.gear.file.strategy.ExcelValidationHandler;
+import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
@@ -26,16 +27,19 @@ public class EasyExcelReaderUtil {
 
     public static <T> void readWithCallback(InputStream is, Class<T> clazz,
                                             Consumer<List<T>> consumer, Integer headRow,
-                                            ExcelValidationHandler<T> validationHandler) {
+                                            ExcelValidationHandler<T> validationHandler,
+                                            Validator validator) {
         int headRowNumber = (headRow == null) ? 1 : headRow;
         File tempFile = null;
 
-        try {
+        // 优化点 1：使用 try-with-resources 接管 InputStream，确保流一定会关闭，防止文件句柄泄露 (Too many open files)
+        try (InputStream autoCloseIs = is) {
             tempFile = File.createTempFile("gear-excel-", ".tmp");
-            Files.copy(is, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            // 优化点 2：挂载 JVM 钩子，应对 kill -9 或 OOM 宕机，防止磁盘爆满
+            tempFile.deleteOnExit();
 
-            // Pass 1: 极速读取临时文件，按 SheetNo 缓存合并规则
-            // 数据结构变更为：Map<SheetNo, 合并规则列表>
+            Files.copy(autoCloseIs, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+
             Map<Integer, List<CellExtra>> sheetMergeRegions = new HashMap<>();
 
             EasyExcel.read(tempFile, clazz, new ReadListener<T>() {
@@ -46,25 +50,24 @@ public class EasyExcelReaderUtil {
                 @Override
                 public void extra(CellExtra extra, AnalysisContext context) {
                     if (extra.getType() == CellExtraTypeEnum.MERGE) {
-                        // 获取当前合并规则属于哪个 Sheet
                         Integer sheetNo = context.readSheetHolder().getSheetNo();
                         sheetMergeRegions.computeIfAbsent(sheetNo, k -> new ArrayList<>()).add(extra);
                     }
                 }
-            }).extraRead(CellExtraTypeEnum.MERGE).doReadAll(); // 改为 doReadAll()，扫描所有 Sheet
+            }).extraRead(CellExtraTypeEnum.MERGE).doReadAll();
 
-            // Pass 2: 正式流式读取所有 Sheet 数据
-            SmartExcelListener<T> listener = new SmartExcelListener<>(consumer, sheetMergeRegions, validationHandler);
+            // 将 Validator 传给 Listener
+            SmartExcelListener<T> listener = new SmartExcelListener<>(consumer, sheetMergeRegions, validationHandler, validator);
             EasyExcel.read(tempFile, clazz, listener)
                     .headRowNumber(headRowNumber)
-                    .doReadAll(); // 改为 doReadAll()
+                    .doReadAll();
 
         } catch (Exception e) {
             throw new GearFileException("Excel 解析失败: " + e.getMessage(), e);
         } finally {
             if (tempFile != null && tempFile.exists()) {
                 if (!tempFile.delete()) {
-                    log.warn("Excel 临时文件删除失败: {}", tempFile.getAbsolutePath());
+                    log.warn("Excel 临时文件常规删除失败: {}", tempFile.getAbsolutePath());
                 }
             }
         }
